@@ -1,0 +1,180 @@
+#include "kernel/types.h"
+#include "kernel/stat.h"
+#include "user/user.h"
+#include "kernel/fcntl.h"
+
+#define MAXBUF 100
+#define MAXARGS 10
+
+char buf[MAXBUF];
+char *args[MAXARGS];
+
+// Read command from user
+int getcmd(char *buf, int nbuf)
+{
+  fprintf(2, ">>> ");
+  memset(buf, 0, nbuf);
+  gets(buf, nbuf);
+
+  if(buf[0] == 0)
+    return -1;
+
+  return 0;
+}
+
+// Parse input string into arguments
+void parse(char *buf, char *argv[])
+{
+  int i = 0;
+  int ws = 1; // flag: start of a new word
+
+  for(int j = 0; buf[j] != '\0'; j++){
+    if(buf[j] == ' ' || buf[j] == '\n'){
+      buf[j] = '\0';
+      ws = 1;
+    } else {
+      if(ws){
+        argv[i++] = &buf[j];
+        ws = 0;
+      }
+    }
+  }
+  argv[i] = 0;
+}
+
+// Execute a command
+void run_command(char *cmd)
+{
+  char *argv[MAXARGS];
+  parse(cmd, argv);
+
+  if(argv[0] == 0)
+    exit(0);
+
+  // Handle "cd" (must be in parent process)
+  if(strcmp(argv[0], "cd") == 0){
+    if(argv[1] == 0){
+      fprintf(2, "cd: missing argument\n");
+    } else if(chdir(argv[1]) < 0){
+      fprintf(2, "cd: failed to change directory\n");
+    }
+    exit(0);
+  }
+
+  // Handle pipes "|"
+  for(int i = 0; cmd[i]; i++){
+    if(cmd[i] == '|'){
+      cmd[i] = 0;
+
+      int p[2];
+      pipe(p);
+
+      if(fork() == 0){
+        close(1);
+        dup(p[1]);
+        close(p[0]);
+        close(p[1]);
+        run_command(cmd);
+      }
+
+      if(fork() == 0){
+        close(0);
+        dup(p[0]);
+        close(p[0]);
+        close(p[1]);
+        run_command(cmd + i + 1);
+      }
+
+      close(p[0]);
+      close(p[1]);
+      wait(0);
+      wait(0);
+      exit(0);
+    }
+  }
+
+  // Handle output redirection ">"
+  for(int i = 0; cmd[i]; i++){
+    if(cmd[i] == '>'){
+      cmd[i] = 0;
+      char *file = cmd + i + 1;
+
+      int fd = open(file, O_CREATE | O_WRONLY);
+      if(fd < 0){
+        fprintf(2, "error: cannot open file\n");
+        exit(1);
+      }
+
+      if(fork() == 0){
+        close(1);
+        dup(fd);
+        close(fd);
+        run_command(cmd);
+      }
+
+      close(fd);
+      wait(0);
+      exit(0);
+    }
+  }
+
+  // Handle input redirection "<"
+  for(int i = 0; cmd[i]; i++){
+    if(cmd[i] == '<'){
+      cmd[i] = 0;
+      char *file = cmd + i + 1;
+
+      int fd = open(file, 0);
+      if(fd < 0){
+        fprintf(2, "error: cannot open file\n");
+        exit(1);
+      }
+
+      if(fork() == 0){
+        close(0);
+        dup(fd);
+        close(fd);
+        run_command(cmd);
+      }
+
+      close(fd);
+      wait(0);
+      exit(0);
+    }
+  }
+
+  // Execute normal command
+  exec(argv[0], argv);
+
+  fprintf(2, "exec %s failed\n", argv[0]);
+  exit(1);
+}
+
+// Main loop
+int main(void)
+{
+  while(getcmd(buf, sizeof(buf)) >= 0){
+
+    // Handle multiple commands separated by ";"
+    char *p = buf;
+    for(int i = 0; buf[i]; i++){
+      if(buf[i] == ';'){
+        buf[i] = 0;
+
+        if(fork() == 0){
+          run_command(p);
+        }
+        wait(0);
+
+        p = buf + i + 1;
+      }
+    }
+
+    if(fork() == 0){
+      run_command(p);
+    }
+    wait(0);
+  }
+
+  exit(0);
+}
